@@ -1,0 +1,900 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 66af0560..2c05c599 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4,6 +4,25 @@ project(Flexric VERSION 0.0.1 LANGUAGES C)
+ 
+ set(CMAKE_C_STANDARD 11)
+ 
++
++set(DOS_PREV_BOOL 0 CACHE BOOL "activate dos prevention")
++
++########
++### DoS Prevention 
++########
++# Check the value of DOS_PREV and set compile definitions accordingly
++if(DOS_PREV_BOOL)
++    add_compile_definitions(DOS_PREV=1)
++else()
++    add_compile_definitions(DOS_PREV=0)
++endif()
++
++set(MAX_SIMUL_XAPPS_SUBS 10 CACHE STRING "Set the upper bound of Simulatanius xapp subscriptions")
++add_compile_definitions(MAX_SIMULTANEOUS_XAPPS_SUBS=${MAX_SIMUL_XAPPS_SUBS})
++
++set(INIT_XAPP_CAP 5 CACHE STRING "Initial Capacity of the xapp")
++add_compile_definitions(INITIAL_XAPP_CAPACITY=${INIT_XAPP_CAP})
++
+ ###
+ ### Reduce compile time 
+ ###
+@@ -373,6 +392,7 @@ if (XAPP_C_INSTALL)
+ endif ()
+ 
+ 
++
+ # make uninstall
+ add_custom_target("uninstall" COMMENT "Uninstall installed files")
+ add_custom_command(
+diff --git a/src/ric/iApp/CMakeLists.txt b/src/ric/iApp/CMakeLists.txt
+index 35b36cad..8e4991c3 100644
+--- a/src/ric/iApp/CMakeLists.txt
++++ b/src/ric/iApp/CMakeLists.txt
+@@ -6,15 +6,21 @@ else()
+   message(FATAL_ERROR "Unknown type")
+ endif()
+ 
++if(DOS_PREV_BOOL)
++  set(MSG_HANDLER "msg_handler_iapp_dosprev.c")
++else()
++  set(MSG_HANDLER "msg_handler_iapp.c")
++endif()
+ 
+ set(E2_IAPP_SRC 
+             asio_iapp.c
++            dos_prevention.c
+             e2ap_iapp.c
+             e2_node_ric_id.c
+             e42_iapp.c
+             e42_iapp_api.c
+             endpoint_iapp.c
+-            msg_handler_iapp.c
++            ${MSG_HANDLER}
+             map_ric_id.c
+             map_xapps_sockaddr.c
+             xapp_ric_id.c
+diff --git a/src/ric/iApp/dos_prevention.c b/src/ric/iApp/dos_prevention.c
+new file mode 100644
+index 00000000..44475a6b
+--- /dev/null
++++ b/src/ric/iApp/dos_prevention.c
+@@ -0,0 +1,90 @@
++#include "dos_prevention.h"
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++#ifndef INITIAL_XAPP_CAPACITY
++#define INITIAL_XAPP_CAPACITY 5
++#endif
++
++#ifndef MAX_SIMULTANEOUS_XAPPS_SUBS
++#define MAX_SIMULTANEOUS_XAPPS_SUBS 10
++#endif
++
++DynamicArray xapp_subscriptions;
++
++void create_xapp_subscriptions_tracker() {
++  xapp_subscriptions.array = (int *)malloc(INITIAL_XAPP_CAPACITY * sizeof(int));
++  if (xapp_subscriptions.array == NULL) {
++    perror("Memory allocation failed");
++    exit(EXIT_FAILURE);
++  }
++  xapp_subscriptions.size = 0;
++  xapp_subscriptions.capacity = INITIAL_XAPP_CAPACITY;
++  printf("[DOS-PREVENTION]: Current max. simultaneous xAPP subs = %d\n", MAX_SIMULTANEOUS_XAPPS_SUBS); 
++}
++
++void append_subscription(int value) {
++  if (xapp_subscriptions.size >= xapp_subscriptions.capacity) {
++    xapp_subscriptions.capacity *= 2;
++    xapp_subscriptions.array = (int *)realloc(
++        xapp_subscriptions.array, xapp_subscriptions.capacity * sizeof(int));
++    if (xapp_subscriptions.array == NULL) {
++      perror("Memory allocation failed");
++      exit(EXIT_FAILURE);
++    }
++  }
++  xapp_subscriptions.array[xapp_subscriptions.size++] = value;
++}
++
++int count_subscriptions(int value) {
++  int count = 0;
++  for (size_t i = 0; i < xapp_subscriptions.size; i++) {
++    if (xapp_subscriptions.array[i] == value) {
++      count++;
++    }
++  }
++  return count;
++}
++
++bool dos_prevention_trigger(int value) {
++  if (count_subscriptions(value) > MAX_SIMULTANEOUS_XAPPS_SUBS) {
++    return false;
++  } else {
++    return true;
++  }
++}
++
++void print_subscriptions() {
++  printf("Current active subscriptions:\n");
++  for (size_t i = 0; i < xapp_subscriptions.size; i++) {
++    printf("%d ", xapp_subscriptions.array[i]);
++  }
++  printf("\n");
++}
++
++void destroy_xapp_subscriptions() { free(xapp_subscriptions.array); }
++
++void delete_single_subscription(int value) {
++  int found = 0;
++  size_t i;
++  for (i = 0; i < xapp_subscriptions.size; i++) {
++    if (xapp_subscriptions.array[i] == value) {
++      found = 1;
++      break;
++    }
++  }
++  if (found) {
++    for (; i < xapp_subscriptions.size - 1; i++) {
++      xapp_subscriptions.array[i] = xapp_subscriptions.array[i + 1];
++    }
++    xapp_subscriptions.size--;
++  } else {
++    printf("Subscription not found.\n");
++  }
++}
++
++// void delete_all_subscriptions(int value) {
++//   int sub_count = count_subscriptions(value);
++//   //   for (;)
++// }
+\ No newline at end of file
+diff --git a/src/ric/iApp/dos_prevention.h b/src/ric/iApp/dos_prevention.h
+new file mode 100644
+index 00000000..9f69b90a
+--- /dev/null
++++ b/src/ric/iApp/dos_prevention.h
+@@ -0,0 +1,23 @@
++#ifndef DOS_PREVENTION_H
++#define DOS_PREVENTION_H
++
++#include <stdbool.h>
++#include <stddef.h> // For size_t
++
++// Define the DynamicArray structure
++typedef struct {
++  int *array;
++  size_t size;
++  size_t capacity;
++} DynamicArray;
++
++// Function prototypes
++void create_xapp_subscriptions_tracker();
++void append_subscription(int value);
++void print_subscriptions();
++void destroy_xapp_subscriptions();
++void delete_single_subscription(int value);
++int count_subscriptions(int value);
++bool dos_prevention_trigger(int value);
++
++#endif /* DOS_PREVENTION_H */
+diff --git a/src/ric/iApp/e42_iapp.c b/src/ric/iApp/e42_iapp.c
+index 0aecd162..5e858777 100644
+--- a/src/ric/iApp/e42_iapp.c
++++ b/src/ric/iApp/e42_iapp.c
+@@ -6,12 +6,10 @@
+ 
+ #include "e42_iapp_api.h"
+ #include "e42_iapp.h"
+-#include "msg_handler_iapp.h"
++
+ #include "iapp_if_generic.h"
+ #include "xapp_ric_id.h"
+ 
+-
+-
+ #include "../../lib/async_event.h"
+ #include "../../lib/ep/sctp_msg.h"
+ #include "../../util/time_now_us.h"
+@@ -19,6 +17,12 @@
+ #include <stdio.h>
+ #include <pthread.h>
+ 
++#if DOS_PREV == 1
++  #include "msg_handler_iapp_dosprev.h"
++#else
++  #include "msg_handler_iapp.h"
++#endif
++
+ e42_iapp_t* init_e42_iapp(const char* addr, near_ric_if_t ric_if)
+ {
+   assert(addr != NULL);
+diff --git a/src/ric/iApp/msg_handler_iapp_dosprev.c b/src/ric/iApp/msg_handler_iapp_dosprev.c
+new file mode 100644
+index 00000000..fc03ebeb
+--- /dev/null
++++ b/src/ric/iApp/msg_handler_iapp_dosprev.c
+@@ -0,0 +1,544 @@
++/*
++ * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The OpenAirInterface Software Alliance licenses this file to You under
++ * the OAI Public License, Version 1.1  (the "License"); you may not use this file
++ * except in compliance with the License.
++a* You may obtain a copy of the License at
++ *
++ *      http://www.openairinterface.org/?page_id=698
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *-------------------------------------------------------------------------------
++ * For more information about the OpenAirInterface (OAI) Software Alliance:
++ *      contact@openairinterface.org
++ */
++
++
++
++#include "../../xApp/e42_xapp_api.h"
++#include "e42_iapp_api.h"
++#include "msg_handler_iapp.h"
++#include "lib/pending_events.h"
++#include "util/alg_ds/alg/alg.h"
++#include "util/compare.h"
++#include "util/alg_ds/ds/lock_guard/lock_guard.h"
++#include "util/time_now_us.h"
++
++#include "iapp_if_generic.h"
++#include "xapp_ric_id.h"
++
++#include "dos_prevention.h"
++
++#include <stdio.h>
++
++
++
++static
++bool check_valid_msg_type(e2_msg_type_t msg_type )
++{
++  return 
++         msg_type == RIC_SUBSCRIPTION_RESPONSE
++      || msg_type == E42_SETUP_REQUEST
++      || msg_type == E42_RIC_SUBSCRIPTION_REQUEST
++      || msg_type == E42_RIC_SUBSCRIPTION_DELETE_REQUEST
++      || msg_type == E42_RIC_CONTROL_REQUEST
++      || msg_type == RIC_CONTROL_ACKNOWLEDGE
++      || msg_type == RIC_INDICATION
++      || msg_type == RIC_SUBSCRIPTION_DELETE_RESPONSE;
++}
++
++void init_handle_msg_iapp(size_t len, handle_msg_fp_iapp (*handle_msg)[len])
++{
++  assert(len == NONE_E2_MSG_TYPE );
++  create_xapp_subscriptions_tracker();
++
++  memset((*handle_msg), 0, sizeof(handle_msg_fp_iapp)*len);
++
++  (*handle_msg)[RIC_SUBSCRIPTION_RESPONSE] = e2ap_handle_subscription_response_iapp;
++  (*handle_msg)[E42_SETUP_REQUEST] = e2ap_handle_e42_setup_request_iapp;
++  (*handle_msg)[E42_RIC_SUBSCRIPTION_REQUEST] = e2ap_handle_e42_ric_subscription_request_iapp;
++  (*handle_msg)[E42_RIC_SUBSCRIPTION_DELETE_REQUEST] = e2ap_handle_e42_ric_subscription_delete_request_iapp;
++  (*handle_msg)[E42_RIC_CONTROL_REQUEST] = e2ap_handle_e42_ric_control_request_iapp;
++  (*handle_msg)[RIC_CONTROL_ACKNOWLEDGE] = e2ap_handle_e42_ric_control_ack_iapp;
++  (*handle_msg)[RIC_INDICATION] = e2ap_handle_ric_indication_iapp;
++  (*handle_msg)[RIC_SUBSCRIPTION_DELETE_RESPONSE] = e2ap_handle_subscription_delete_response_iapp;
++
++//  (*handle_msg)[RIC_SUBSCRIPTION_REQUEST] = e2ap_handle_subscription_request_iapp;
++//  (*handle_msg)[RIC_SUBSCRIPTION_DELETE_REQUEST] =  e2ap_handle_subscription_delete_request_iapp;
++//  (*handle_msg)[RIC_CONTROL_REQUEST] = e2ap_handle_control_request_iapp;
++//  (*handle_msg)[E2AP_ERROR_INDICATION] = e2ap_handle_error_indication_iapp;
++//  (*handle_msg)[E2_SETUP_REQUEST] = e2ap_handle_setup_request_iapp;
++//  (*handle_msg)[E2AP_RESET_REQUEST] =  e2ap_handle_reset_request_iapp;
++//  (*handle_msg)[E2AP_RESET_RESPONSE] =  e2ap_handle_reset_response_iapp;
++//  (*handle_msg)[RIC_SERVICE_UPDATE_ACKNOWLEDGE] =  e2ap_handle_service_update_ack_iapp;
++//  (*handle_msg)[RIC_SERVICE_UPDATE_FAILURE] =  e2ap_handle_service_update_failure_iapp;
++//  (*handle_msg)[RIC_SERVICE_QUERY] = e2ap_handle_service_query_iapp;
++//  (*handle_msg)[E2_NODE_CONFIGURATION_UPDATE_ACKNOWLEDGE] =  e2ap_handle_node_configuration_update_ack_iapp;
++//  (*handle_msg)[E2_NODE_CONFIGURATION_UPDATE_FAILURE] =  e2ap_handle_node_configuration_update_failure_iapp;
++//  (*handle_msg)[E2_CONNECTION_UPDATE] =  e2ap_handle_connection_update_iapp;
++
++}
++
++e2ap_msg_t e2ap_handle_subscription_response_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == RIC_SUBSCRIPTION_RESPONSE);
++
++  ric_subscription_response_t const* src = &msg->u_msgs.ric_sub_resp; 
++
++  xapp_ric_id_xpct_t const xpctd = find_xapp_map_ric_id(&iapp->map_ric_id, src->ric_id.ric_req_id);
++  assert(xpctd.has_value == true && "RIC Req Id not found!"); 
++  xapp_ric_id_t const x = xpctd.xapp_ric_id; 
++
++  assert(src->ric_id.ran_func_id == x.ric_id.ran_func_id);
++  assert(src->ric_id.ric_inst_id == x.ric_id.ric_inst_id);
++
++  e2ap_msg_t ans = {.type = RIC_SUBSCRIPTION_RESPONSE};
++  defer({ e2ap_msg_free_iapp(&iapp->ap, &ans);} );
++  ric_subscription_response_t* dst = &ans.u_msgs.ric_sub_resp;
++  *dst = mv_ric_subscription_respponse(src);
++  dst->ric_id.ric_req_id = x.ric_id.ric_req_id;
++
++  sctp_msg_t sctp_msg = {0}; 
++  sctp_msg.info = find_map_xapps_sad(&iapp->ep.xapps, x.xapp_id);
++  sctp_msg.ba = e2ap_msg_enc_iapp(&iapp->ap, &ans); 
++  defer({ free_sctp_msg(&sctp_msg); } );
++       
++  e2ap_send_sctp_msg_iapp(&iapp->ep, &sctp_msg);
++
++  e2ap_msg_t none = {.type = NONE_E2_MSG_TYPE};
++  return none;
++}
++
++e2ap_msg_t e2ap_handle_subscription_delete_response_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == RIC_SUBSCRIPTION_DELETE_RESPONSE );
++
++  ric_subscription_delete_response_t const* src = &msg->u_msgs.ric_sub_del_resp; 
++
++  xapp_ric_id_xpct_t const xpctd = find_xapp_map_ric_id(&iapp->map_ric_id, src->ric_id.ric_req_id);
++  if(xpctd.has_value == false){
++    printf("[iApp]: SUBSCRIPTION DELETE RESPONSE rx RAN_FUNC_ID %d RIC REQ ID %d but no xApp associated\n",  src->ric_id.ran_func_id, src->ric_id.ric_req_id);
++    e2ap_msg_t none = {.type = NONE_E2_MSG_TYPE};
++    return none;
++  }
++ 
++  assert(xpctd.has_value == true && "RIC Req Id not found!"); 
++
++
++  xapp_ric_id_t const x = xpctd.xapp_ric_id; 
++
++  assert(src->ric_id.ran_func_id == x.ric_id.ran_func_id);
++  assert(src->ric_id.ric_inst_id == x.ric_id.ric_inst_id);
++
++  e2ap_msg_t ans = {.type = RIC_SUBSCRIPTION_DELETE_RESPONSE };
++  defer( { e2ap_msg_free_iapp(&iapp->ap, &ans); } );
++  ric_subscription_delete_response_t* dst = &ans.u_msgs.ric_sub_del_resp;
++  dst->ric_id = x.ric_id;
++
++  sctp_msg_t sctp_msg = {0};
++  sctp_msg.info = find_map_xapps_sad(&iapp->ep.xapps, x.xapp_id);
++  sctp_msg.ba = e2ap_msg_enc_iapp(&iapp->ap, &ans); 
++  defer({ free_sctp_msg(&sctp_msg); } );
++       
++  e2ap_send_sctp_msg_iapp(&iapp->ep, &sctp_msg);
++
++  printf("[iApp]: RIC_SUBSCRIPTION_DELETE_RESPONSE tx RAN_FUNC_ID %d RIC_REQ_ID %d \n", x.ric_id.ran_func_id, x.ric_id.ric_req_id);
++
++  rm_map_ric_id(&iapp->map_ric_id, &x);
++
++  e2ap_msg_t none = {.type = NONE_E2_MSG_TYPE};
++  return none;
++}
++
++e2ap_msg_t e2ap_handle_e42_ric_control_ack_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == RIC_CONTROL_ACKNOWLEDGE);
++
++  ric_control_acknowledge_t const* src = &msg->u_msgs.ric_ctrl_ack; 
++
++  xapp_ric_id_xpct_t const xpctd = find_xapp_map_ric_id(&iapp->map_ric_id, src->ric_id.ric_req_id);
++  assert(xpctd.has_value == true && "RIC Req Id not found!"); 
++  xapp_ric_id_t const x = xpctd.xapp_ric_id; 
++
++  assert(src->ric_id.ran_func_id == x.ric_id.ran_func_id);
++  assert(src->ric_id.ric_inst_id == x.ric_id.ric_inst_id);
++
++  e2ap_msg_t ans = {.type = RIC_CONTROL_ACKNOWLEDGE };
++  defer( { e2ap_msg_free_iapp(&iapp->ap, &ans); } );
++  ric_control_acknowledge_t* dst = &ans.u_msgs.ric_ctrl_ack;
++  dst->ric_id = x.ric_id;
++
++#ifdef E2AP_V1
++  dst->status = src->status; 
++#endif
++
++  sctp_msg_t sctp_msg = {0};
++  sctp_msg.info = find_map_xapps_sad(&iapp->ep.xapps, x.xapp_id);
++  sctp_msg.ba = e2ap_msg_enc_iapp(&iapp->ap, &ans); 
++  defer({ free_sctp_msg(&sctp_msg); } );
++       
++  e2ap_send_sctp_msg_iapp(&iapp->ep, &sctp_msg);
++
++  printf("[iApp]: RIC_CONTROL_ACKNOWLEDGE tx\n");
++
++  rm_map_ric_id(&iapp->map_ric_id, &x);
++
++  e2ap_msg_t none = {.type = NONE_E2_MSG_TYPE};
++  return none;
++}
++
++static
++e42_setup_response_t generate_setup_response(e42_iapp_t* iapp, e42_setup_request_t const* req)
++{
++  assert(iapp != NULL);
++  assert(req != NULL);
++
++  ran_function_t* rf = req->ran_func_item; 
++  assert(rf != NULL);
++  size_t const len_rf = req->len_rf; 
++  assert(len_rf > 0);
++
++  // ToDo, permissions and whether the SM exists in the iApp, should be checked
++  e2_node_arr_t ans = generate_e2_node_arr( &iapp->e2_nodes); 
++
++
++  e42_setup_response_t sr = {.xapp_id = iapp->xapp_id++,
++                             .len_e2_nodes_conn = ans.len,
++                             .nodes = ans.n};
++
++  return sr;
++}
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_setup_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == E42_SETUP_REQUEST); 
++  const e42_setup_request_t* req = &msg->u_msgs.e42_stp_req;
++
++  printf("[iApp]: E42 SETUP-REQUEST rx\n");
++
++  e2ap_msg_t ans = {.type = E42_SETUP_RESPONSE };
++  ans.u_msgs.e42_stp_resp = generate_setup_response(iapp, req); 
++
++  printf("[iApp]: E42 SETUP-RESPONSE tx\n");
++
++  return ans;
++}
++
++e2ap_msg_t e2ap_handle_ric_indication_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == RIC_INDICATION); 
++
++  ric_indication_t const* src = &msg->u_msgs.ric_ind;
++
++  xapp_ric_id_xpct_t xpctd = find_xapp_map_ric_id(&iapp->map_ric_id, src->ric_id.ric_req_id);
++
++  if(xpctd.has_value == false){
++    printf("RIC Indication message arrived for RIC REQ ID %d but no xApp associated\n", src->ric_id.ric_req_id);
++    e2ap_msg_t none = {.type = NONE_E2_MSG_TYPE};
++    return none;
++  }
++  
++  xapp_ric_id_t const x = xpctd.xapp_ric_id; 
++
++  assert(src->ric_id.ran_func_id == x.ric_id.ran_func_id);
++  assert(src->ric_id.ric_inst_id == x.ric_id.ric_inst_id);
++
++  e2ap_msg_t ans = {.type = RIC_INDICATION};
++  defer( { e2ap_msg_free_iapp(&iapp->ap, &ans); } );
++  ric_indication_t* dst = &ans.u_msgs.ric_ind;
++  // Moving transfers ownership
++  *dst = mv_ric_indication((ric_indication_t*)src);
++  dst->ric_id.ric_req_id = x.ric_id.ric_req_id;
++
++  sctp_msg_t sctp_msg = {0}; 
++  sctp_msg.info = find_map_xapps_sad(&iapp->ep.xapps, x.xapp_id);
++  sctp_msg.ba = e2ap_msg_enc_iapp(&iapp->ap, &ans); 
++  defer({ free_sctp_msg(&sctp_msg); } );
++
++  e2ap_send_sctp_msg_iapp(&iapp->ep, &sctp_msg);
++
++  e2ap_msg_t none = {.type = NONE_E2_MSG_TYPE};
++  return none;
++}
++
++static
++bool valid_xapp_id(e42_iapp_t* iapp, uint32_t xapp_id)
++{
++  assert(iapp != NULL);
++  assert(xapp_id < 1 << 16);
++  return xapp_id <= iapp->xapp_id;
++}
++
++static
++bool valid_global_e2_node(e42_iapp_t* iapp, global_e2_node_id_t const* id )
++{
++  assert(iapp != NULL);
++  assert(id != NULL);
++
++  e2_node_arr_t nodes = generate_e2_node_arr(&iapp->e2_nodes); 
++ // defer( { free_e2_node_arr(&nodes);  }  );
++
++  for(size_t i = 0; i < nodes.len; ++i){
++   if( eq_global_e2_node_id(&nodes.n[i].id, id) == true){
++      free_e2_node_arr(&nodes); 
++     return true; 
++   }
++  }
++  
++  free_e2_node_arr(&nodes); 
++  return false;
++}
++
++e2ap_msg_t e2ap_handle_e42_ric_subscription_delete_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == E42_RIC_SUBSCRIPTION_DELETE_REQUEST); 
++
++  const e42_ric_subscription_delete_request_t* src = &msg->u_msgs.e42_ric_sub_del_req;
++
++  xapp_ric_id_t x = { .ric_id = src->sdr.ric_id,
++                      .xapp_id = src->xapp_id 
++                    };
++
++  e2_node_ric_id_t n = find_ric_req_map_ric_id(&iapp->map_ric_id, &x);
++  assert(n.ric_req_type == SUBSCRIPTION_RIC_REQUEST_TYPE);
++
++  ric_subscription_delete_request_t dst = cp_ric_subscription_delete_request(&src->sdr);
++  dst.ric_id.ric_req_id = n.ric_id.ric_req_id;
++
++  fwd_ric_subscription_request_delete_gen(iapp->ric_if.type, &n.e2_node_id, &dst, notify_msg_iapp_api);
++
++  printf("[iApp]: RIC_SUBSCRIPTION_DELETE_REQUEST tx RIC_REQ_ID %d \n",n.ric_id.ric_req_id);
++
++  printf("[iApp]: DEL-DOS_PREVENTION REMOVED %d\n", x.xapp_id);
++  delete_single_subscription(x.xapp_id);
++  // print_subscriptions();
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans;
++}
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_ric_subscription_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == E42_RIC_SUBSCRIPTION_REQUEST); 
++
++  e42_ric_subscription_request_t const * e42_sr = &msg->u_msgs.e42_ric_sub_req;
++ 
++  assert(valid_xapp_id(iapp, e42_sr->xapp_id) == true);
++  assert(valid_global_e2_node(iapp, &e42_sr->id ) );
++
++  xapp_ric_id_t xapp_ric_id = {.ric_id = e42_sr->sr.ric_id,
++                                .xapp_id = e42_sr->xapp_id };
++
++  if (dos_prevention_trigger(xapp_ric_id.xapp_id)) {
++    // I do not like the mtx here but there is a data race if not
++    int rc = pthread_rwlock_wrlock(&iapp->map_ric_id.rw); 
++    assert(rc == 0);
++
++    uint16_t const new_ric_id = fwd_ric_subscription_request_gen(iapp->ric_if.type, &e42_sr->id, &e42_sr->sr, notify_msg_iapp_api);
++
++    e2_node_ric_id_t n = { .ric_id = e42_sr->sr.ric_id, //  new_ric_id,
++                            .e2_node_id = cp_global_e2_node_id(&e42_sr->id), 
++                            .ric_req_type = SUBSCRIPTION_RIC_REQUEST_TYPE }; 
++
++    n.ric_id.ric_req_id = new_ric_id;
++
++
++    add_map_ric_id(&iapp->map_ric_id, &n, &xapp_ric_id);
++    rc = pthread_rwlock_unlock(&iapp->map_ric_id.rw); 
++    assert(rc == 0);
++
++    printf("[iApp]: SUBSCRIPTION-REQUEST RAN_FUNC_ID %d RIC_REQ_ID %d tx \n", xapp_ric_id.ric_id.ran_func_id, xapp_ric_id.ric_id.ric_req_id);
++
++    append_subscription(xapp_ric_id.xapp_id);
++    printf("[iApp]: SUBSCRIPTION-ADDED %d TO DOS PREVENTION \n", xapp_ric_id.xapp_id);
++    // print_subscriptions();
++  }
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_ric_control_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == E42_RIC_CONTROL_REQUEST );
++
++  e42_ric_control_request_t const* e42_cr = &msg->u_msgs.e42_ric_ctrl_req;
++
++  assert(valid_xapp_id(iapp, e42_cr->xapp_id) == true);
++  assert(valid_global_e2_node(iapp, &e42_cr->id));
++
++  xapp_ric_id_t xapp_ric_id = {.ric_id = e42_cr->ctrl_req.ric_id,
++                                .xapp_id = e42_cr->xapp_id};
++
++  // I do not like the mtx here but there is a data race if not
++  int rc = pthread_rwlock_wrlock(&iapp->map_ric_id.rw); 
++  assert(rc == 0);
++
++  uint16_t new_ric_id = fwd_ric_control_request_gen(iapp->ric_if.type, &e42_cr->id, &e42_cr->ctrl_req, notify_msg_iapp_api);
++
++  e2_node_ric_id_t n = { .ric_id = e42_cr->ctrl_req.ric_id, //  new_ric_id,
++                          .e2_node_id = cp_global_e2_node_id(&e42_cr->id),
++                          .ric_req_type = CONTROL_RIC_REQUEST_TYPE }; 
++  n.ric_id.ric_req_id = new_ric_id;
++
++  add_map_ric_id(&iapp->map_ric_id, &n, &xapp_ric_id);
++  rc = pthread_rwlock_unlock(&iapp->map_ric_id.rw); 
++  assert(rc == 0);
++
++  printf("[iApp]: E42_RIC_CONTROL_REQUEST rx\n");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_msg_handle_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(msg != NULL);
++  const e2_msg_type_t msg_type = msg->type;
++  assert(check_valid_msg_type(msg_type) == true);
++  assert(iapp->handle_msg[ msg_type ] != NULL);
++  return iapp->handle_msg[msg_type](iapp, msg); 
++}
++
++e2ap_msg_t e2ap_handle_subscription_delete_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == RIC_SUBSCRIPTION_DELETE_REQUEST);
++
++  assert(0 != 0 && "Should not come here");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans;
++}
++  
++// The purpose of the RIC Control procedure is to initiate or resume a specific functionality in the E2 Node.
++e2ap_msg_t e2ap_handle_control_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(msg->type == RIC_CONTROL_REQUEST);
++
++  assert(0!=0 && "Should not come here...");
++
++  printf("[E2-AGENT]: CONTROL ACKNOWLEDGE tx\n");
++  e2ap_msg_t ans = {.type = RIC_CONTROL_ACKNOWLEDGE};
++
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_error_indication_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_reset_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_reset_response_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++  
++e2ap_msg_t e2ap_handle_service_update_ack_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_service_update_failure_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_service_query_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_node_configuration_update_ack_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_node_configuration_update_failure_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++e2ap_msg_t e2ap_handle_connection_update_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg)
++{
++  assert(iapp != NULL);
++  assert(msg != NULL);
++  assert(0!=0 && "Not implemented");
++
++  e2ap_msg_t ans = {.type = NONE_E2_MSG_TYPE};
++  return ans; 
++}
++
++
+diff --git a/src/ric/iApp/msg_handler_iapp_dosprev.h b/src/ric/iApp/msg_handler_iapp_dosprev.h
+new file mode 100644
+index 00000000..85f1f449
+--- /dev/null
++++ b/src/ric/iApp/msg_handler_iapp_dosprev.h
+@@ -0,0 +1,122 @@
++/*
++ * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The OpenAirInterface Software Alliance licenses this file to You under
++ * the OAI Public License, Version 1.1  (the "License"); you may not use this file
++ * except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.openairinterface.org/?page_id=698
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *-------------------------------------------------------------------------------
++ * For more information about the OpenAirInterface (OAI) Software Alliance:
++ *      contact@openairinterface.org
++ */
++
++
++
++#ifndef MSG_HANDLER_IAPP_DOSPREV
++#define MSG_HANDLER_IAPP_DOSPREV
++
++#include "e42_iapp.h"
++#include "lib/e2ap/type_defs_wrapper.h"
++
++void init_handle_msg_iapp(size_t len, handle_msg_fp_iapp (*handle_msg)[len]);
++
++e2ap_msg_t e2ap_msg_handle_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg);
++
++
++///////////////////////////////////////////////////////////////////////////////////////////////////
++// O-RAN E2APv01.01: Messages for Global Procedures ///////////////////////////////////////////////
++///////////////////////////////////////////////////////////////////////////////////////////////////
++// RIC -> E2
++e2ap_msg_t e2ap_handle_subscription_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++//RIC -> E2
++e2ap_msg_t e2ap_handle_subscription_delete_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_control_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++// E2 -> RIC
++e2ap_msg_t e2ap_handle_subscription_response_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++///////////////////////////////////////////////////////////////////////////////////////////////////
++// O-RAN E2APv01.01: Messages for Global Procedures ///////////////////////////////////////////////
++///////////////////////////////////////////////////////////////////////////////////////////////////
++
++// RIC <-> E2 
++e2ap_msg_t e2ap_handle_error_indication_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_setup_request_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_setup_failure_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC <-> E2
++e2ap_msg_t e2ap_handle_reset_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC <-> E2
++e2ap_msg_t e2ap_handle_reset_response_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++  
++// RIC -> E2
++e2ap_msg_t e2ap_handle_service_update_ack_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_service_update_failure_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_service_query_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_node_configuration_update_ack_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_node_configuration_update_failure_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// RIC -> E2
++e2ap_msg_t e2ap_handle_connection_update_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_ric_subscription_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_ric_subscription_delete_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++
++// xApp -> iApp
++e2ap_msg_t e2ap_handle_e42_ric_control_request_iapp(e42_iapp_t* ag, const e2ap_msg_t* msg);
++
++// iApp -> xApp
++e2ap_msg_t e2ap_handle_ric_indication_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg);
++
++// iApp -> xApp
++e2ap_msg_t e2ap_handle_subscription_delete_response_iapp( e42_iapp_t* iapp, const e2ap_msg_t* msg);
++
++
++
++// iApp -> xApp 
++e2ap_msg_t e2ap_handle_e42_ric_control_ack_iapp(e42_iapp_t* iapp, const e2ap_msg_t* msg);
++
++#endif
++

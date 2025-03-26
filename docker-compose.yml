@@ -1,0 +1,15 @@
+version: '3.4'
+services:
+  dos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # add default argument to build flexric without dos protection
+      args: 
+        DOS_PREV_ENABL: "0"
+    environment:
+            - "START_MODE=${START_MODE}"
+    volumes:
+            - ./dos:/flexric/dos
+# volumes:
+#   dos:
