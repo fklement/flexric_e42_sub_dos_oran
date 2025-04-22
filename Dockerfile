@@ -18,7 +18,10 @@ RUN git clone https://github.com/swig/swig.git
 RUN cd swig && git checkout release-4.1 && ./autogen.sh && ./configure --prefix=/usr/ && make -j8 && make install
 
 # FlexRIC Installation
-RUN git clone https://gitlab.eurecom.fr/mosaic5g/flexric.git 
+RUN git clone https://gitlab.eurecom.fr/mosaic5g/flexric.git && \
+    cd flexric && \
+    git checkout tags/v2.0.0
+
 ADD ./dos /flexric/dos
 COPY ./patches/dos.patch /flexric/
 COPY ./patches/prevention.patch /flexric/
